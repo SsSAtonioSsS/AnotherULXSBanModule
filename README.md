@@ -1,6 +1,8 @@
 # AnotherULXSBanModule
 Another implementation of SourceBans in to a ULX module.
-MySQLOO native support. Forked for blood-glade.ru
+
+Can work without mysqloo, only need web-server with apache2 or nginx and php.
+Forked for rz-proj.ru
 
 This work is licensed under the Creative Commons Attribution-NonCommercial-ShareAlike 3.0 License.
 To view a copy of this license, visit http://creativecommons.org/licenses/by-nc-sa/3.0/ or send a letter to
