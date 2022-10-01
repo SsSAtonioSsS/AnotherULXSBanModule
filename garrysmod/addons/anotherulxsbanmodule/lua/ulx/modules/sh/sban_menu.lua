@@ -3,10 +3,15 @@ local CATEGORY_NAME = "Source Bans"
 function ulx.sban( calling_ply, target_ply, minutes, reason )
 	
 	if target_ply:IsBot() then
-		ULib.tsayError( calling_ply, "Cannot ban a bot", true )
+		ULib.tsayError( calling_ply, "Нельзя банить бота", true )
 		return
 	end
-
+	
+	if !reason or string.len(reason) < 3 or reason == "reason" then
+	ULib.tsayError( calling_ply, "Ошибка: Укажите причину бана!", true )
+	return
+	end
+	
 	local time = "for #i minute(s)"
 	if minutes == 0 then time = "permanently" end
 	local str = "#A banned #T " .. time
@@ -21,77 +26,169 @@ sban:addParam{ type=ULib.cmds.NumArg, hint="minutes, 0 for perma", ULib.cmds.opt
 sban:addParam{ type=ULib.cmds.StringArg, hint="reason", ULib.cmds.optional, ULib.cmds.takeRestOfLine, completes=ulx.common_kick_reasons }
 sban:defaultAccess( ULib.ACCESS_ADMIN )
 sban:help( "Bans target." )
-
-function ulx.sbanid( calling_ply, steamid, minutes, reason )
-	steamid = steamid:upper()
-	if not ULib.isValidSteamID( steamid ) then
-		ULib.tsayError( calling_ply, "Invalid steamid." )
+-- Comms --
+function ulx.smute( calling_ply, target_ply, minutes, reason, should_unmute )
+	
+	if target_ply:IsBot() then
+		ULib.tsayError( calling_ply, "Боту нельзя отключить чат", true )
 		return
 	end
 
+	if should_unmute then
+			if target_ply.sb_Muted == nil then
+			ULib.tsayError( calling_ply, target_ply:Nick() .. " не в муте!", true )
+			return
+			end
+			
+			if !reason or string.len(reason) < 3 or reason == "reason" then
+			ULib.tsayError( calling_ply, "Ошибка: Укажите причину снятия мута!", true )
+			return
+			end
+			
+			SBAN_uncommsplayer(target_ply, reason, calling_ply, 2)	
+		else
+			if (target_ply.sb_Muted ~=nil and (target_ply.sb_Muted>os.time() or target_ply.sb_Muted == 0)) then
+			ULib.tsayError( calling_ply, target_ply:Nick() .. " в муте!", true )
+			return
+			end
+			
+			if !reason or string.len(reason) < 3 or reason == "reason" then
+			ULib.tsayError( calling_ply, "Ошибка: Укажите причину мута!", true )
+			return
+			end
+			
+				if (SBAN_commsplayer(target_ply, minutes*60, reason, calling_ply, 2)) then
+				local time = "for #i minute(s)"
+				if minutes == 0 then time = "permanently" end
+				local str = "#A muted #T " .. time
+				if reason and reason ~= "" then str = str .. " (#s)" end
+				ulx.fancyLogAdmin( calling_ply, str, target_ply, minutes ~= 0 and minutes or reason, reason )
+			end
+	end
+		
+end
+local smute = ulx.command( CATEGORY_NAME, "ulx smute", ulx.smute, "!smute" )
+smute:addParam{ type=ULib.cmds.PlayerArg }
+smute:addParam{ type=ULib.cmds.NumArg, hint="minutes, 0 for perma", ULib.cmds.optional, ULib.cmds.allowTimeString, min=0 }
+smute:addParam{ type=ULib.cmds.StringArg, hint="reason", ULib.cmds.optional, ULib.cmds.takeRestOfLine, completes=ulx.common_comms_reasons }
+smute:addParam{ type=ULib.cmds.BoolArg, invisible=true }
+smute:defaultAccess( ULib.ACCESS_ADMIN )
+smute:help( "Отключить текстовой чат игроку." )
+smute:setOpposite( "ulx unsmute", {_, _, 0, _, true}, "!unsmute" )
+
+function ulx.sgag( calling_ply, target_ply, minutes, reason, should_ungag )
+	
+	if target_ply:IsBot() then
+		ULib.tsayError( calling_ply, "Cannot gag a bot", true )
+		return
+	end
+	
+	if should_ungag then
+			if target_ply.sb_Gaged == nil then
+			ULib.tsayError( calling_ply, target_ply:Nick() .. " не в гаге!", true )
+			return
+			end
+			
+			if !reason or string.len(reason) < 3 or reason == "reason" then
+			ULib.tsayError( calling_ply, "Ошибка: Укажите причину снятия гага!", true )
+			return
+			end
+			
+			SBAN_uncommsplayer(target_ply, reason, calling_ply, 1)
+		else
+			if (target_ply.sb_Gaged ~=nil and(target_ply.sb_Gaged>os.time() or target_ply.sb_Gaged == 0)) then
+			ULib.tsayError( calling_ply, target_ply:Nick() .. " в гаге!", true )
+			return
+			end
+			
+			if !reason or string.len(reason) < 3 or reason == "reason" then
+			ULib.tsayError( calling_ply, "Ошибка: Укажите причину гага!", true )
+			return
+			end
+			
+				if(SBAN_commsplayer(target_ply, minutes*60, reason, calling_ply, 1)) then
+						local time = "for #i minute(s)"
+						if minutes == 0 then time = "permanently" end
+						local str = "#A gaged #T " .. time
+						if reason and reason ~= "" then str = str .. " (#s)" end
+						ulx.fancyLogAdmin( calling_ply, str, target_ply, minutes ~= 0 and minutes or reason, reason )
+				end
+	end
+
+end
+local sgag = ulx.command( CATEGORY_NAME, "ulx sgag", ulx.sgag, "!sgag" )
+sgag:addParam{ type=ULib.cmds.PlayerArg }
+sgag:addParam{ type=ULib.cmds.NumArg, hint="minutes, 0 for perma", ULib.cmds.optional, ULib.cmds.allowTimeString, min=0 }
+sgag:addParam{ type=ULib.cmds.StringArg, hint="reason", ULib.cmds.optional, ULib.cmds.takeRestOfLine, completes=ulx.common_comms_reasons }
+sgag:addParam{ type=ULib.cmds.BoolArg, invisible=true }
+sgag:defaultAccess( ULib.ACCESS_ADMIN )
+sgag:help( "Gags target." )
+sgag:setOpposite( "ulx unsgag", {_, _, 0, _, true}, "!unsgag" )
+
+-- Comms --
+function ulx.sbanid( calling_ply, steamid, minutes, reason, should_unbanid )
+	steamid = steamid:upper()
+	if not ULib.isValidSteamID( steamid ) then
+		ULib.tsayError( calling_ply, "Неверный SteamID." )
+		return
+	end
+	if should_unbanid then
+		if SBanTable[ steamid ] then
+		if ( SBanTable[ steamid ].adminid != calling_ply.sb_aid ) and !ULib.ucl.query( calling_ply, "ulx unsbanall" )  then
+			ULib.tsayError( calling_ply, "Ошибка: У вас нет прав на удаление бана другого админа.", true )
+			return
+		end
+		local function cb()
+		name = SBanTable[ steamid ] and SBanTable[ steamid ].name
+		if name == nil then return end
+		if !reason or string.len(reason) < 3 or reason == "reason" then
+			ULib.tsayError( calling_ply, "Ошибка: Укажите причину снятия бана!", true )
+			return
+		end
+		SBAN_unban( steamid, calling_ply, reason )
+		if name then
+			ulx.fancyLogAdmin( calling_ply, "#A unbanned steamid #s", steamid .. " (" .. name .. ")" )
+		else
+			ulx.fancyLogAdmin( calling_ply, "#A unbanned steamid #s", steamid )
+		end
+	end
+	if not SBanTable[ steamid ] then
+		SBAN_canunban(steamid, calling_ply, function(result,qtab)
+			if #result > 0 then
+				ULib.tsayError( calling_ply, "Ошибка: У вас нет прав на удаление бана другого админа.", true )
+			else
+				cb()
+			end
+		end)
+	else
+		cb()
+	end
+	end
+	else
+	if !reason or string.len(reason) < 3 or reason == "reason" then
+	ULib.tsayError( calling_ply, "Ошибка: Укажите причину бана!", true )
+	return
+	end
 	local name
 	local targetPly = player.GetBySteamID(steamid)
 	name = targetPly and targetPly:Nick() or nil
-	
-	local time = "for #i minute(s)"
-	if minutes == 0 then time = "permanently" end
-	local str = "#A banned steamid #s "
-
-	local steamidLogStr = name and (steamid .. "(" .. name .. ") ") or steamid
-	str = str .. time
-	if reason and reason ~= "" then str = str .. " (#4s)" end
-	ulx.fancyLogAdmin( calling_ply, str, steamidLogStr, minutes ~= 0 and minutes or reason, reason )
-
-	SBAN_doban( (targetPly and targetPly:IPAddress() or "unknown"), steamid, (name and name or "[Unknown]"), minutes*60, reason, calling_ply)
+	SBAN_dobanID((targetPly and targetPly:IPAddress() or "unknown"), steamid, (name and name or "[Unknown]"), minutes*60, reason, calling_ply)
 	if targetPly then
 		timer.Simple(0, function()
 			if !IsValid(targetPly) then return end
 			targetPly:Kick(reason)
 		end)
 	end
-
+	end
 end
 local sbanid = ulx.command( CATEGORY_NAME, "ulx sbanid", ulx.sbanid )
 sbanid:addParam{ type=ULib.cmds.StringArg, hint="steamid" }
 sbanid:addParam{ type=ULib.cmds.NumArg, hint="minutes, 0 for perma", ULib.cmds.optional, ULib.cmds.allowTimeString, min=0 }
 sbanid:addParam{ type=ULib.cmds.StringArg, hint="reason", ULib.cmds.optional, ULib.cmds.takeRestOfLine, completes=ulx.common_kick_reasons }
+sbanid:addParam{ type=ULib.cmds.BoolArg, invisible=true }
 sbanid:defaultAccess( ULib.ACCESS_SUPERADMIN )
-sbanid:help( "Bans steamid." )
-
------------------------------- Unban SourceBans ------------------------------
-function ulx.unsban( calling_ply, steamid, ureason )
-	steamid = steamid:upper()
-	if not ULib.isValidSteamID( steamid ) then
-		ULib.tsayError( calling_ply, "Error: Invalid Steam ID!", true )
-		return
-	end
-	if SBanTable[ steamid ] then
-		if ( SBanTable[ steamid ].adminid != calling_ply.sb_aid ) and !ULib.ucl.query( calling_ply, "ulx unsbanall" )  then
-			ULib.tsayError( calling_ply, "Error: You do not have permission to remove another admin's ban.", true )
-			return
-		end
-	elseif !SBAN_canunban(steamid, calling_ply) then
-		ULib.tsayError( calling_ply, "Error: You do not have permission to remove another admin's ban.", true )
-		return
-	end
-	name = SBanTable[ steamid ] and SBanTable[ steamid ].name
-	if !ureason or string.len(ureason) < 3 then
-		ULib.tsayError( calling_ply, "Error: Please specify an unban reason!", true )
-		return
-	end
-	ureason = calling_ply:Nick() .. ": "..ureason
-	SBAN_unban( steamid, calling_ply, ureason )
-	if name then
-		ulx.fancyLogAdmin( calling_ply, "#A unbanned steamid #s", steamid .. " (" .. name .. ")" )
-	else
-		ulx.fancyLogAdmin( calling_ply, "#A unbanned steamid #s", steamid )
-	end
-end
-local unsban = ulx.command( CATEGORY_NAME, "ulx unsban", ulx.unsban )
-unsban:addParam{ type=ULib.cmds.StringArg, hint="Steam ID" }
-unsban:addParam{ type=ULib.cmds.StringArg, hint="Unban reason", ULib.cmds.takeRestOfLine }
-unsban:defaultAccess( ULib.ACCESS_ADMIN )
-unsban:help( "Unbans Steam ID from SourceBans." )
+sbanid:help( "Бан по SteamID." )
+sbanid:setOpposite( "ulx unsbanid", {_, _, 0, _, true}, "!unsbanid" )
 
 ------------------------------ Vote SBan ------------------------------
 
@@ -113,13 +210,9 @@ local function voteSBanDone2( t, target, time, ply, reason )
 	if reason and reason ~= "" then str = str .. " (#s)" end
 	ulx.fancyLogAdmin( ply, str, target, time ~= 0 and time or reason, reason )
 	
-	ULib.queueFunctionCall( SBAN_banplayer, target, time*60, reason, 0)
+	reason = reason .. " by ["..ply:SteamID().."]"
 	
-		--[[if reason and reason ~= "" then
-			ULib.kick( target, "Vote ban successful. (" .. reason .. ")" )
-		else
-			ULib.kick( target, "Vote ban successful." )
-		end]]--
+	ULib.queueFunctionCall( SBAN_banplayer, target, time*60, reason, 1)
 	end
 end
 
@@ -154,7 +247,12 @@ function ulx.voteSBan( calling_ply, target_ply, minutes, reason )
 		ULib.tsayError( calling_ply, "There is already a vote in progress. Please wait for the current one to end.", true )
 		return
 	end
-
+	
+	if !reason or string.len(reason) < 3 or reason == "reason" then
+	ULib.tsayError( calling_ply, "Ошибка: Укажите причину бана!", true )
+	return
+	end
+	
 	local msg = "SBan " .. target_ply:Nick() .. " for " .. minutes .. " minutes?"
 	if reason and reason ~= "" then
 		msg = msg .. " (" .. reason .. ")"

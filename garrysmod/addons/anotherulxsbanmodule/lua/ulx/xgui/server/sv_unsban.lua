@@ -88,7 +88,7 @@ function unbans.init()
 
 		if bantime ~= 0 then
 			if (SBanTable[steamID].time + bantime*60) <= os.time() then --New ban time makes the ban expired				
-				ulx.unsban( ply, steamID, "Expired" )
+				ulx.sbanid( ply, steamID, 0, "Expired", true )
 				return
 			end
 			--bantime = bantime - (os.time() - SBanTable[steamID].time)/60

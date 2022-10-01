@@ -167,7 +167,7 @@ function xunbans.RemoveBan( ID, bandata )
 	Derma_Query( "Are you sure you would like to unban " .. tempstr .. " - " .. ID .. "?", "XGUI WARNING", 
 		"Unban...",	function()
 						Derma_StringRequest("Unban Reason?", "Please specify the unban reason.", "", function(text) 
-							RunConsoleCommand( "ulx", "unsban", ID, text ) 
+							RunConsoleCommand( "ulx", "unsbanid", ID, text ) 
 							xunbans.RemoveBanDetailsWindow( ID )
 						end,
 						function() end)

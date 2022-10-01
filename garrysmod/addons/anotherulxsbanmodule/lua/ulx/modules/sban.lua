@@ -22,38 +22,38 @@
 -- Add ulx_sban_serverid to your server.cfg
 
 local SBAN_PREFIX			= "sb_"					--Prefix don't change if you don't know what you are doing
-local SBAN_WEBSITE			= "sourceban.domain.com"	--Source Bans Website
+local SBAN_WEBSITE			= "web"	--Source Bans Website
 
 local SBANDATABASE_HOSTNAME	= "localhost"			-- Database IP/Host
 local SBANDATABASE_HOSTPORT	= 3306					--Database Port (Default mysql port 3306)
-local SBANDATABASE_DATABASE	= "sourceban"			--Database Database/Schema
+local SBANDATABASE_DATABASE	= "db"			--Database Database/Schema
 local SBANDATABASE_USERNAME	= "user"			--Database Username
 local SBANDATABASE_PASSWORD	= "pass"	--Database Password
+local SBANDATABASE_SOCKET   = "/var/run/mysqld/mysqld.sock" -- socket if required
 
-local APIKey				= "1234567890" -- See http://steamcommunity.com/dev/apikey
+local APIKey				= "" -- See http://steamcommunity.com/dev/apikey
 local removeFromGroup		= true			-- Remove users from server groups if they don't exist in the sourcebans database
-local checkSharing			= true			-- Check if players are borrowing the game, !!!! THIS REQUIRES AN API KEY !!!!!
+local checkSharing			= false			-- Check if players are borrowing the game, !!!! THIS REQUIRES AN API KEY !!!!!
 local checkIP				= false			-- Check ban database using IP.
 local banLender				= true			-- Ban the lender of the game as well if the player gets banned?
+local CommLender			= true
 local announceBanCount		= true			-- Announce to admins if players have bans on record.
 local announceLender		= true			-- Announce to admins if players are borrowing gmod.
 local banRetrieveLimit		= 150			-- Amount of bans to retrieve in XGUI.
 local banListRefreshTime	= 119			-- Seconds between refreshing the banlist in XGUI, in case the bans change from outside of the server.
 local tttKarmaBan			= false			-- Enable support for TTT karma bans.
-ulxBanOverride				= false			-- Override the default ulx ban to use sban.
+ulxBanOverride				= true			-- Override the default ulx ban to use sban.
 
 -- Table of groups who will get sharing/ban count notifications when players join.
 -- Follow the format below to add more groups, make sure to add a comma if it isn't the last entry.
 local adminTable = {
 	["superadmin"] = true,
-	["admin"] = true,
 }
 
 
 -- This table excludes named groups from being removed, even if the option is turned on.
 -- Format is the same as the admin table above.
 local excludedGroups = {
-	["vip"] = true,
 }
 if !file.Exists("sban", "DATA") then
 	file.CreateDir("sban")
@@ -68,6 +68,7 @@ if !file.Exists("sban/config.txt", "DATA") then
 	configTable.SBANDATABASE_DATABASE = SBANDATABASE_DATABASE
 	configTable.SBANDATABASE_USERNAME = SBANDATABASE_USERNAME
 	configTable.SBANDATABASE_PASSWORD = SBANDATABASE_PASSWORD
+	configTable.SBANDATABASE_SOCKET = SBANDATABASE_SOCKET
 	configTable.APIKey = APIKey
 	configTable.removeFromGroup = removeFromGroup and "yes" or "no"
 	configTable.checkSharing = checkSharing and "yes" or "no"
@@ -90,6 +91,7 @@ else
 	SBANDATABASE_DATABASE = configTable.sbandatabase_database
 	SBANDATABASE_USERNAME = configTable.sbandatabase_username
 	SBANDATABASE_PASSWORD = configTable.sbandatabase_password
+	SBANDATABASE_SOCKET = configTable.sbandatabase_socket
 	APIKey = configTable.apikey
 	removeFromGroup = configTable.removefromgroup == "yes"
 	checkSharing = configTable.checksharing == "yes"
@@ -115,14 +117,28 @@ else
 	excludedGroups = util.JSONToTable( file.Read("sban/excludedgroups.txt", "DATA"))
 end
 
-require("pmysql1")
+require("mysqloo")
 -- Don't touch these
-local database_sban = pmysql1.connect( SBANDATABASE_HOSTNAME, SBANDATABASE_USERNAME, SBANDATABASE_PASSWORD, SBANDATABASE_DATABASE, SBANDATABASE_HOSTPORT )
-CreateConVar("ulx_sban_serverid", "-1", FCVAR_NONE, "Sets the SBAN ServerID for the Source Bans ULX module")
+
+local database_sban = mysqloo.connect( SBANDATABASE_HOSTNAME, SBANDATABASE_USERNAME, SBANDATABASE_PASSWORD, SBANDATABASE_DATABASE, SBANDATABASE_HOSTPORT, SBANDATABASE_SOCKET)
+
+function database_sban:onConnectionFailed(err)
+    MsgN('SBan MySQL: Connection Failed, please check your settings: ' .. err)
+end
+function database_sban:onConnected()
+	self:setCharacterSet("utf8")
+    MsgN('SBan MySQL: Connected!')
+end
+database_sban:connect()
+
+CreateConVar("ulx_sban_serverid", "-1", FCVAR_NONE, "Установка номера сервера sban")
 local apiErrorCount = 0
 local apiLastCheck = 0
 SBanTable = SBanTable or {}
 local ipCache = {}
+local function escape(str)
+	return database_sban:escape(tostring(str))
+end
 
 -- ServerID in server.cfg file
 cvars.AddChangeCallback( "ulx_sban_serverid", function()
@@ -132,10 +148,10 @@ cvars.AddChangeCallback( "ulx_sban_serverid", function()
 	end
 end)
 
-hook.Add("Initialize", "CheckServerID", function()
+hook.Add("Initialize", "Проверка индификатора сервера", function()
 	if !SBAN_SERVERID then
 		if !GetConVar("ulx_sban_serverid"):GetInt() then
-			ErrorNoHalt("[SBAN][ERROR] ulx_sban_serverid has not been set in server.cfg!\n")
+			ErrorNoHalt("[SBAN][ERROR] ulx_sban_serverid не задан в server.cfg!\n")
 		end
 		SBAN_SERVERID = GetConVar("ulx_sban_serverid"):GetInt() or 1
 	end
@@ -146,20 +162,31 @@ end)
 local function SBAN_SQL_Query_Callback(results, qTab)
 	qTab.cb(results, qTab)
 end
-
+local function queryError(q,err, sql)
+	if db:status() ~= mysqloo.DATABASE_CONNECTED then
+		db:connect()
+		db:wait()
+		if db:status() ~= mysqloo.DATABASE_CONNECTED then
+			ErrorNoHalt("Re-connection to database server failed.")
+			return
+		end
+	end
+	MsgN('SBan MySQL: Query Failed: ' .. err .. ' (' .. sql .. ')')
+end
 local function SBAN_SQL_Query(sql, qTab)
 	local qTab = qTab or {}
 	qTab.query = sql
-	if qTab.wait then
-		return function(sql)
-			local results = database_sban:query_sync(sql)
-			return results[1].data
+	if qTab.cb then
+		local q=database_sban:query(sql)
+		function q:onSuccess(result)
+			SBAN_SQL_Query_Callback(result,qTab)
 		end
-	elseif qTab.cb then
-		database_sban:query(sql, SBAN_SQL_Query_Callback, qTab)
-		
+		q.onError=queryError
+		q:start()
 	else
-		database_sban:query(sql)
+		local q=database_sban:query(sql)
+		q.onError=queryError
+		q:start()
 	end
 end
 
@@ -172,7 +199,7 @@ local function RemoveAdmin(ply)
 	end
 end
 
-local function DoKick(ply, reason)
+local function DoKick(ply, reason, length)
 	--if !IsValid(ply) then return end
 	local steamID
 	if type(ply) == "string" then
@@ -183,24 +210,59 @@ local function DoKick(ply, reason)
 		return
 	end
 	
+	local ft = "на"..(math.floor(length/60/60/24/365)>0 and " "..math.floor(length/60/60/24/365) .." г" or "")..(math.floor((length/60/60/24/30)%12)>0 and " "..math.floor((length/60/60/24/30)%12) .." мес" or "")..(math.floor((length/60/60/24)%30) > 0 and " "..math.floor((length/60/60/24)%30) .. " дн" or "")..(math.floor((length/60/60)%24)>0 and " "..math.floor((length/60/60)%24) .. " ч" or "")..(math.floor((length/60)%60) >0 and " "..math.floor((length/60)%60) .. " мин" or "")
 	if(reason == nil) then
-		game.KickID( steamID, "You have been banned from this server, please visit "..SBAN_WEBSITE)
+		game.KickID( steamID, "Вы были забанены " .. (length == 0 and "навсегда" or ft) .. ", пожалуйста посетите "..SBAN_WEBSITE)
 	else
-		game.KickID( steamID, "You have been banned from this server ("..reason.."), please visit "..SBAN_WEBSITE)
+		game.KickID( steamID, "Вы были забанены за '"..reason.."' " .. (length == 0 and "навсегда" or "на "..ft) .. ", пожалуйста посетите "..SBAN_WEBSITE)
 	end
 end
+--
+local function DoMute(ply, admin, reason)
+	
+	if type(admin) == "string" then
+		admin = admin
+	elseif IsValid(admin) and admin:IsPlayer() then
+		admin = admin:Nick()
+	else
+		admin = "Console"
+	end
+	local length = ply.sb_Muted - os.time()
+	local ft = "на"..(math.floor(length/60/60/24/365)>0 and " "..math.floor(length/60/60/24/365) .." г" or "")..(math.floor((length/60/60/24/30)%12)>0 and " "..math.floor((length/60/60/24/30)%12) .." мес" or "")..(math.floor((length/60/60/24)%30) > 0 and " "..math.floor((length/60/60/24)%30) .. " дн" or "")..(math.floor((length/60/60)%24)>0 and " "..math.floor((length/60/60)%24) .. " ч" or "")..(math.floor((length/60)%60) >0 and " "..math.floor((length/60)%60) .. " мин" or "")
 
+	ULib.tsayColor( ply, true, Color( 255, 146, 24 ), "Вам отключил чат "..admin.." "..(ply.sb_Muted == 0 and "навсегда" or ft).." ("..reason..")." )
+	ULib.tsayColor( ply, true, Color( 246, 118, 142 ), "https://"..SBAN_WEBSITE.."/index.php?p=commslist&searchText="..ply:SteamID().."")
+	hook.Add( "PlayerSay", "sb_Muted", function(ply, text) if(ply.sb_Muted) and (ply.sb_Muted ==0 or ply.sb_Muted > os.time()) then return false end end)
+end
+
+local function DoGag(ply, admin, reason)
+
+	if type(admin) == "string" then
+		admin = admin
+	elseif IsValid(admin) and admin:IsPlayer() then
+		admin = admin:Nick()
+	else
+		admin = "Console"
+	end
+	local length = ply.sb_Gaged - os.time()
+	local ft = "на"..(math.floor(length/60/60/24/365)>0 and " "..math.floor(length/60/60/24/365) .." г" or "")..(math.floor((length/60/60/24/30)%12)>0 and " "..math.floor((length/60/60/24/30)%12) .." мес" or "")..(math.floor((length/60/60/24)%30) > 0 and " "..math.floor((length/60/60/24)%30) .. " дн" or "")..(math.floor((length/60/60)%24)>0 and " "..math.floor((length/60/60)%24) .. " ч" or "")..(math.floor((length/60)%60) >0 and " "..math.floor((length/60)%60) .. " мин" or "")
+
+	ULib.tsayColor( ply, true, Color( 255, 146, 24 ), "Вам отключил голосовой чат "..admin.." "..(ply.sb_Gaged == 0 and "навсегда" or ft).." ("..reason..")." )
+	ULib.tsayColor( ply, true, Color( 246, 118, 142 ), "https://"..SBAN_WEBSITE.."/index.php?p=commslist&searchText="..ply:SteamID().."")
+	hook.Add( "PlayerCanHearPlayersVoice", "sb_Gaged", function( listener, talker ) if(talker.sb_Gaged) and (talker.sb_Gaged ==0 or talker.sb_Gaged > os.time()) then return false end end)
+end
+--
 local function ReportBlock(bid, name)
 	local ostime = os.time();
 	local qTab = {}
 	qTab.wait = false
-	local query = "INSERT INTO "..database_sban:escape(SBAN_PREFIX).."banlog (sid, time, name, bid)"
-	query = query.." VALUES ("..database_sban:escape(SBAN_SERVERID)..", "..database_sban:escape(ostime)..", '"..database_sban:escape(name).."', "..database_sban:escape(bid)..");"
+	local query = "INSERT INTO "..escape(SBAN_PREFIX).."banlog (sid, time, name, bid)"
+	query = query.." VALUES ("..escape(SBAN_SERVERID)..", "..escape(ostime)..", '"..escape(name).."', "..escape(bid)..");"
 	
 	SBAN_SQL_Query(query, qTab)
 end
 
-local function StillBanned(ply, bid, reason, preSpawn)
+local function StillBanned(ply, bid, reason, preSpawn, length)
 	if (!preSpawn and !IsValid(ply)) then return end
 	
 	local name
@@ -215,14 +277,53 @@ local function StillBanned(ply, bid, reason, preSpawn)
 	end
 	
 	ReportBlock(bid, name)
-	DoKick(steamID, reason)
+	DoKick(steamID, reason, length)
 end
-
+--
+local function StillComm(ply, ends, length, reason, admin, comms_type)
+	if (!IsValid(ply)) then return end
+	
+	if(length == 0)then ends=0 end
+	
+	if (comms_type == 2) then
+	ply.sb_Muted = ends
+	DoMute(ply, admin, reason)
+	end
+	
+	if (comms_type == 1) then
+	ply.sb_Gaged = ends
+	DoGag(ply, admin, reason)
+	end
+end
+--
 ULib.ucl.registerAccess( "ulx unsbanall", ULib.ACCESS_SUPERADMIN, "Ability to unban all sban entries", "Other" ) -- Permission for admins to unban players banned by other admins.
 ULib.ucl.registerAccess( "ulx editsbanall", ULib.ACCESS_SUPERADMIN, "Ability to edit all sban entries", "Other" ) -- Permission for admins to edit bans made by other admins.
 
 -- ############### Global Helper functions ##############
--- ######################################################
+-- ######################################################(targetPly and targetPly:IPAddress() or "unknown"), steamid, (name and name or "[Unknown]"), minutes*60, reason, calling_ply
+function SBAN_dobanID(inip, steamID, name, length, reason, callingAdmin)
+steamID = escape(steamID)
+flag = false
+local qTab = {}
+qTab.cb = function(result, qTab)
+if #result > 0 then
+ULib.tsayColor( callingAdmin, true, Color( 255, 146, 24 ), "["..escape(steamID).."] already banned!")
+else
+
+	local time = "for #i minute(s)"
+	if length == 0 then time = "permanently" end
+	local str = "#A banned steamid #s "
+
+	local steamidLogStr = name and (steamID .. "(" .. name .. ") ") or steamID
+	str = str .. time
+	if reason and reason ~= "" then str = str .. " (#4s)" end
+	ulx.fancyLogAdmin( callingAdmin, str, steamidLogStr, length ~= 0 and math.ceil(length/60) or reason, reason )
+	
+SBAN_doban(inip, steamID, name, length, reason, callingAdmin)
+end
+end
+SBAN_SQL_Query("SELECT 1 FROM "..escape(SBAN_PREFIX).."bans WHERE authid = '" ..escape(steamID).. "' AND (RemoveType IS NULL OR RemoveType != 'U') AND (length = 0 OR ends > UNIX_TIMESTAMP())", qTab)
+end
 
 function SBAN_doban(inip, steamID, name, length, reason, callingAdmin, lenderID)
 	local adminID = 0
@@ -232,31 +333,64 @@ function SBAN_doban(inip, steamID, name, length, reason, callingAdmin, lenderID)
 		adminID = callingAdmin.sb_aid
 	end
 
-	local ip = database_sban:escape(string.Explode(":", inip)[1])
-	steamID = database_sban:escape(steamID)
-	name = database_sban:escape(name)
-	length = database_sban:escape(length)
-	reason = database_sban:escape(reason)
-	adminID = database_sban:escape(adminID)
+	local ip = escape(string.Explode(":", inip)[1])
+	steamID = escape(steamID)
+	name = escape(name)
+	length = escape(length)
+	reason = escape(reason)
+	adminID = escape(adminID)
 	local qTab = {}
 	qTab.wait = false
 	
 	local time = os.time()
 	
-	local query = "INSERT INTO "..database_sban:escape(SBAN_PREFIX).."bans (ip, authid, name, created, ends, length, reason, aid, sid) "
-	query = query.." VALUES ('"..ip.."', '"..steamID.."', '"..name.."',"..time..", "..(time + length)..", "..length..", '"..reason.."', "..adminID..", "..database_sban:escape(SBAN_SERVERID)..");"
+	local query = "INSERT INTO "..escape(SBAN_PREFIX).."bans (ip, authid, name, created, ends, length, reason, aid, sid) "
+	query = query.." VALUES ('"..ip.."', '"..steamID.."', '"..name.."',"..time..", "..(time + length)..", "..length..", '"..reason.."', "..adminID..", "..escape(SBAN_SERVERID)..");"
 	SBAN_SQL_Query(query, qTab)
 	
 	if lenderID and banLender then
-		lenderID = database_sban:escape(lenderID)
-		local query2 = "INSERT INTO "..database_sban:escape(SBAN_PREFIX).."bans (ip, authid, name, created, ends, length, reason, aid, sid) "
-		query2 = query2.."VALUES ('"..ip.."', '"..lenderID.."', '"..name.."',"..time..", "..(time + length)..", "..length..", '"..reason.."', "..adminID..", "..database_sban:escape(SBAN_SERVERID)..");"
+		lenderID = escape(lenderID)
+		local query2 = "INSERT INTO "..escape(SBAN_PREFIX).."bans (ip, authid, name, created, ends, length, reason, aid, sid) "
+		query2 = query2.."VALUES ('"..ip.."', '"..lenderID.."', '"..name.."',"..time..", "..(time + length)..", "..length..", '"..reason.."', "..adminID..", "..escape(SBAN_SERVERID)..");"
 		SBAN_SQL_Query(query2, qTab)
 		
 	end
 	XGUIRefreshBans()
 end
-
+--
+function SBAN_docomm(steamid, name, length, reason, callingAdmin, lenderID, comms_type)
+	
+	local adminID = 0
+	if type(callingAdmin) == "number" then
+		adminID = callingAdmin
+	elseif callingAdmin:IsPlayer() and type(callingAdmin.sb_aid) == "number" then
+		adminID = callingAdmin.sb_aid
+	end
+	
+	steamID = escape(steamid)
+	name = escape(name)
+	length = escape(length)
+	reason = escape(reason)
+	adminID = escape(adminID)
+	local qTab = {}
+	qTab.wait = false
+	
+	local time = os.time()
+	
+	local query = "INSERT INTO "..escape(SBAN_PREFIX).."comms (authid, name, created, ends, length, reason, aid, sid, type) "
+	query = query.."VALUES ('"..steamID.."', '"..name.."', "..time..", "..time+length..", "..length..", '"..reason.."', "..adminID..", "..escape(SBAN_SERVERID)..", "..comms_type..");"
+	
+	SBAN_SQL_Query(query, qTab)
+	
+	if lenderID and CommLender then
+		lenderID = escape(lenderID)
+		local query2 = "INSERT INTO "..escape(SBAN_PREFIX).."comms (authid, name, created, ends, length, reason, aid, sid, type) "
+		query2 = query2.."VALUES ('"..lenderID.."', '"..name.."', "..time..", "..time+length..", "..length..", '"..reason.."', "..adminID..", "..escape(SBAN_SERVERID)..", "..comms_type..");"
+		SBAN_SQL_Query(query2, qTab)
+	end
+	return true
+end
+--
 function SBAN_banplayer(ply, length, reason, callingadmin)
 	local lenderid = nil
 	if ply.familyshared then
@@ -267,9 +401,71 @@ function SBAN_banplayer(ply, length, reason, callingadmin)
 	local name = ply:Nick()
 
 	SBAN_doban(ip, steamID, name, length, reason, callingadmin ,lenderid)
-	DoKick(steamID, reason)
+	DoKick(steamID, reason, length)
+end
+--
+function SBAN_uncommsplayer(ply, ureason, callingadmin, comms_type)
+
+local adminID = escape(callingadmin.sb_aid or 0)
+
+	local query = "SELECT c.bid, c.aid, c.sid FROM "..escape(SBAN_PREFIX).."comms c WHERE c.authid = '"..escape(ply:SteamID()).."' AND c.type = "..comms_type.." AND c.RemoveType IS NULL"
+	local qTab = {}
+	qTab.admin = callingadmin
+	qTab.UReason = ureason
+	qTab.AdminID = adminID
+	qTab.CommsType = comms_type
+	qTab.ply = ply
+	qTab.cb = function(result, qTab)
+		if #result > 0 then
+		
+		if (result[1].sid == SBAN_SERVERID and (result[1].aid == tonumber(qTab.AdminID) or ULib.ucl.query( qTab.admin, "ulx unsbanall" ))) or qTab.admin:GetUserGroup() == "superadmin" then
+		local query2 = "UPDATE "..escape(SBAN_PREFIX).."comms SET RemovedOn = "..os.time()..", RemovedBy = "..qTab.AdminID..", RemoveType = 'U', ureason = '"..escape(qTab.UReason).."' WHERE bid = '"..result[1].bid.."' and RemoveType is null and type = "..qTab.CommsType..""
+			local qTab2 = {}
+			qTab2.wait = false
+			SBAN_SQL_Query(query2, qTab2)
+		
+		if (qTab.CommsType == 1) then
+			ulx.fancyLogAdmin( qTab.admin, "#A включил голосовой чат для #T ("..qTab.UReason..")", qTab.ply )
+			qTab.ply.sb_Gaged = nil
+		elseif (qTab.CommsType == 2) then
+			qTab.ply.sb_Muted = nil
+			ulx.fancyLogAdmin( qTab.admin, "#A включил текстовой чат для #T ("..qTab.UReason..")", qTab.ply )
+		end
+		
+		return
+		end
+		
+			ULib.tsayError( qTab.admin," Вам не позволено снимать ограничение с "..qTab.ply:Nick().."!", true )
+		return
+		else
+		
+			ULib.tsayError( qTab.admin, "Ошибка! Блокировка не найдена.", true )
+		return 
+		end
+	end
+	SBAN_SQL_Query(query, qTab)
 end
 
+function SBAN_commsplayer(ply, length, reason, callingadmin, comms_type)
+	local steamid = ply:SteamID()
+	local name = ply:Nick()
+	local lenderid = nil
+	if ply.familyshared then
+		lenderid = ply.lenderid
+	end
+	
+	if(comms_type==2)then
+	ply.sb_Muted = (length ~=0 and length+os.time() or 0)
+	DoMute(ply, callingadmin, reason)
+	
+	elseif (comms_type==1)then
+	ply.sb_Gaged = (length ~=0 and length+os.time() or 0)
+	DoGag(ply, callingadmin, reason)
+	end
+	
+	return SBAN_docomm(steamid, name, length, reason, callingadmin ,lenderid, comms_type)
+end
+--
 function SBAN_getadmin_id(steamid)
 	local found
 	for k, v in pairs(player.GetAll()) do
@@ -279,33 +475,35 @@ function SBAN_getadmin_id(steamid)
 		end
 	end
 	
+	local time = os.time()
+	
 	if found.sb_aid then return found.sb_aid end
 	
 	local qTab = {}
 	qTab.wait = true
-	local query = SBAN_SQL_Query("SELECT aid FROM "..database_sban:escape(SBAN_PREFIX).."admins WHERE authid = '" ..database_sban:escape(steamid).. "'", qTab)
+	local query = SBAN_SQL_Query("SELECT aid FROM "..escape(SBAN_PREFIX).."admins WHERE authid = '" ..escape(steamid).. "'", qTab)
 	return query[1].aid
 end
 
 function SBAN_unban(steamid, ply, ureason)
-	local adminID = database_sban:escape(ply.sb_aid or 0)
+	local adminID = escape(ply.sb_aid or 0)
 	local qTab = {}
 	qTab.wait = false
-	SBAN_SQL_Query("UPDATE "..database_sban:escape(SBAN_PREFIX).."bans SET RemovedOn = "..os.time()..", RemovedBy = "..adminID..", RemoveType = 'U', ureason = '"..database_sban:escape(ureason).."' WHERE authid = '"..database_sban:escape(steamid).."' and RemoveType is null", qTab)
+	SBAN_SQL_Query("UPDATE "..escape(SBAN_PREFIX).."bans SET RemovedOn = "..os.time()..", RemovedBy = "..adminID..", RemoveType = 'U', ureason = '"..escape(ureason).."' WHERE authid = '"..escape(steamid).."' and RemoveType is null", qTab)
 	XGUIRefreshBans()
 end
 
-function SBAN_canunban(steamid, ply)
+function SBAN_canunban(steamid, ply, cb)
 	local adminID = ply.sb_aid or 0
 	
-	local query = "SELECT * FROM "..database_sban:escape(SBAN_PREFIX).."bans WHERE authid = '"..database_sban:escape(steamid).."' and RemoveType is null"
+	local query = "SELECT * FROM "..escape(SBAN_PREFIX).."bans WHERE authid = '"..escape(steamid).."' and RemoveType is null"
 	if !ULib.ucl.query( ply, "ulx unsbanall" ) then
-		query = query .. " and aid = "..database_sban:escape(adminID)
+		query = query .. " and aid = "..escape(adminID)
 	end
 	local qTab = {}
 	qTab.wait = true
-	
-	return #SBAN_SQL_Query(query, qTab) > 0
+	qTab.cb = cb
+	SBAN_SQL_Query(query, qTab)
 end
 
 function SBAN_updateban(steamID, ply, bantime, reason, name)
@@ -314,18 +512,19 @@ function SBAN_updateban(steamID, ply, bantime, reason, name)
 		updateName = name
 	end
 	
-	bantime = database_sban:escape(bantime)
-	updateName = database_sban:escape(updateName)
-	reason = database_sban:escape(reason)
-	steamID = database_sban:escape(steamID)
+	bantime = escape(bantime)
+	updateName = escape(updateName)
+	reason = escape(reason)
+	steamID = escape(steamID)
 	
 	local qTab = {}
 	qTab.wait = false
-	local query = "UPDATE "..database_sban:escape(SBAN_PREFIX).."bans SET ends = created + "..bantime
+	local query = "UPDATE "..escape(SBAN_PREFIX).."bans SET ends = created + "..bantime
 	query = query .. ", length = "..bantime..", name = '"..updateName.."', reason = '"..reason.."' WHERE authid = '"..steamID.."' and RemoveType is null"
 	SBAN_SQL_Query(query, qTab)
 	XGUIRefreshBans()
 end
+
 -- ############### Unban UI  Section ###############
 -- #################################################
 
@@ -353,8 +552,8 @@ function SBAN_RetrieveBans()
 	if !banRetrieveLimit or type(banRetrieveLimit) != number then
 		banRetrieveLimit = 150
 	end
-	banRetrieveLimit = database_sban:escape(banRetrieveLimit)
-	SBAN_SQL_Query("SELECT a.user as admin, b.aid, b.bid, b.sid, b.name, b.reason, b.authid, b.created, b.ends FROM " ..database_sban:escape(SBAN_PREFIX).. "bans b INNER JOIN " ..database_sban:escape(SBAN_PREFIX).. "admins a ON b.aid = a.aid WHERE b.RemoveType is null ORDER BY b.created DESC LIMIT "..banRetrieveLimit, qTab)
+	banRetrieveLimit = escape(banRetrieveLimit)
+	SBAN_SQL_Query("SELECT a.user as admin, b.aid, b.bid, b.sid, b.name, b.reason, b.authid, b.created, b.ends FROM " ..escape(SBAN_PREFIX).. "bans b INNER JOIN " ..escape(SBAN_PREFIX).. "admins a ON b.aid = a.aid WHERE b.RemoveType is null ORDER BY b.created DESC LIMIT "..banRetrieveLimit, qTab)
 end
 hook.Add("InitPostEntity", "LoadSbans", SBAN_RetrieveBans)
 
@@ -365,7 +564,7 @@ timer.Create("UpdateBanListPls", banListRefreshTime, 0, SBAN_RetrieveBans)
 
 local function CheckAdmin(result, qTab, lev)
 	local ply = qTab.ply
-	local steamid = database_sban:escape(qTab.steamID)
+	local steamid = escape(qTab.steamID)
 	local aid = qTab.aid
 	
 	qTab.cb = nil
@@ -378,8 +577,9 @@ local function CheckAdmin(result, qTab, lev)
 			-- This should return the same Admin ID if they are specifically an admin on this server. (not in a group)
 
 			qTab.cb = function(result, qTab) CheckAdmin(result, qTab, "checkadmingroup") end
-			SBAN_SQL_Query("SELECT admin_id FROM "..database_sban:escape(SBAN_PREFIX).."admins_servers_groups WHERE admin_id="..database_sban:escape(result[1].aid).." AND srv_group_id=-1 AND server_id="..database_sban:escape(SBAN_SERVERID), qTab)
-		else
+			SBAN_SQL_Query("SELECT a.admin_id FROM "..escape(SBAN_PREFIX).."admins_servers_groups a INNER JOIN "..escape(SBAN_PREFIX).."admins b ON a.admin_id = b.aid WHERE a.admin_id="..escape(result[1].aid).." AND a.srv_group_id=-1 AND a.server_id="..escape(SBAN_SERVERID).." AND (b.expired = 0 OR b.expired > UNIX_TIMESTAMP())", qTab)
+
+	else
 			-- Remove them if they don't exist at all
 			RemoveAdmin(ply)
 			return
@@ -387,21 +587,19 @@ local function CheckAdmin(result, qTab, lev)
 		
 	elseif lev == "checkadmingroup" then
 	
-		if #result >= 1 then --Admin has permissions for this specific server, finding admin group to add.
+		if #result >= 1 then
 			qTab.cb = function(result, qTab) CheckAdmin(result, qTab, "addtogroup") end
-			SBAN_SQL_Query("SELECT srv_group FROM "..database_sban:escape(SBAN_PREFIX).."admins WHERE authid = '" ..steamid.. "'", qTab)
+			SBAN_SQL_Query("SELECT srv_group FROM "..escape(SBAN_PREFIX).."admins WHERE authid = '" ..steamid.. "'", qTab)
 			return
 		else
-			-- Admin not in this server specifically, checking server group
 			qTab.cb = function(result, qTab) CheckAdmin(result, qTab, "servergroupmatch") end
 			local qS = [[
 			SELECT * FROM %sservers_groups sg 
 			WHERE sg.server_id = %s 
-			AND (
-					SELECT asg.srv_group_id FROM %sadmins_servers_groups asg WHERE admin_id = %s and asg.srv_group_id = sg.group_id
+			AND ( SELECT asg.srv_group_id FROM %sadmins_servers_groups asg WHERE admin_id = %s and asg.srv_group_id = sg.group_id
 					) >= 1;
 			]]
-			local servermatchq = string.format(qS, database_sban:escape(SBAN_PREFIX), database_sban:escape(SBAN_SERVERID), database_sban:escape(SBAN_PREFIX), database_sban:escape(aid))
+			local servermatchq = string.format(qS, escape(SBAN_PREFIX), escape(SBAN_SERVERID), escape(SBAN_PREFIX), escape(aid))
 			SBAN_SQL_Query(servermatchq, qTab)
 			return
 		end
@@ -424,7 +622,7 @@ local function CheckAdmin(result, qTab, lev)
 		
 		if #result >= 1 then
 			qTab.cb = function(result, qTab) CheckAdmin(result, qTab, "addtogroup") end
-			SBAN_SQL_Query("SELECT srv_group FROM "..database_sban:escape(SBAN_PREFIX).."admins WHERE authid = '" ..steamid.. "'", qTab)
+			SBAN_SQL_Query("SELECT srv_group FROM "..escape(SBAN_PREFIX).."admins WHERE authid = '" ..steamid.. "'", qTab)
 			return
 		else
 			RemoveAdmin(ply)
@@ -442,14 +640,14 @@ local function StartAdminCheck(ply, steamid)
 	qTab.steamID = steamid
 	qTab.cb = function(result, qTab) CheckAdmin(result, qTab) end
 
-	SBAN_SQL_Query("SELECT aid FROM "..database_sban:escape(SBAN_PREFIX).."admins WHERE authid = '" ..database_sban:escape(steamid).. "'", qTab)
+	SBAN_SQL_Query("SELECT aid FROM "..escape(SBAN_PREFIX).."admins WHERE authid = '" ..escape(steamid).. "'", qTab)
 end
 
 -- ############### Ban Checks #####################
 -- ################################################
 
-local function DetermineBanned(result, qTab, preSpawn)
-	local ply
+local function DetermineUniv (result, qTab, preSpawn)
+local ply
 	local steamID
 	if preSpawn then
 		ply = {}
@@ -461,63 +659,33 @@ local function DetermineBanned(result, qTab, preSpawn)
 	end
 	
 	if #result > 0 then
-		
+
 		for k,v in pairs(result) do
-		
-			if (v.length == 0) and (v.RemoveType != "U") then
-				StillBanned(ply, v.bid, v.reason, preSpawn)
-				return
-			elseif (v.length != 0) and (v.ends > os.time()) and (v.RemoveType != "U") then
-				StillBanned(ply, v.bid, v.reason, preSpawn)
-				return
+			if (v.type == nil) then
+			StillBanned(ply, v.bid, v.reason, preSpawn, v.length)
+			return
+			elseif (!preSpawn) then
+			StillComm(ply, v.ends, v.length, v.reason, v.user, v.type)
 			end
 			
 		end
 		
-		if preSpawn then return end
-
-		ply.BanCount = #result
-
-		local banPlural = (ply.BanCount > 1) and "bans" or "ban"
-		local banText = ""
-		if ply.familyshared then
-			banText = string.format("%s's lender (%s) has %s %s on record.", ply:Nick(), steamID, ply.BanCount, banPlural)
-		else
-			banText = string.format("%s (%s) has %s %s on record.", ply:Nick(), steamID, ply.BanCount, banPlural)
-		end
-	
-		if announceBanCount then
-		
-			timer.Create("BanCount"..steamID, 10, 1, function()
-				if !IsValid(ply) then return end
-				for k,v in pairs(player.GetAll()) do
-					if adminTable[v:GetUserGroup()] then
-						v:ChatPrint(banText)
-					end
-				end
-			end)
-			
-		end
-		
 	end
+	
 	if preSpawn then return end
+	
 	if ply.familyshared then return end
 	StartAdminCheck(ply, steamID)
 end
 
-local function StartBanCheck(ply, steamID)
-	local qTab = {}
-	qTab.ply = ply
-	qTab.steamID = steamID
-	qTab.ip = string.Explode(":", ply:IPAddress())[1]
-	qTab.cb = function(result, qTab) DetermineBanned(result, qTab) end
-	
-	SBAN_SQL_Query("SELECT bid, authid, ends, length, reason, RemoveType FROM "..database_sban:escape(SBAN_PREFIX).."bans WHERE authid = '" ..database_sban:escape(steamID).. "'", qTab)
-	
-	if checkIP and not ipCache[qTab.ip] then
-		SBAN_SQL_Query("SELECT bid, authid, ends, length, reason, RemoveType FROM "..database_sban:escape(SBAN_PREFIX).."bans WHERE ip = '" ..database_sban:escape(qTab.ip).. "'", qTab)
-		ipCache[qTab.ip] = true
-	end
+local function StartUnivCheck(ply, steamID)
+local qTab = {}
+qTab.ply = ply
+qTab.steamID = steamID
+
+qTab.cb = function(result, qTab) DetermineUniv(result, qTab) end
+
+SBAN_SQL_Query("SELECT bid, authid, length, reason, RemoveType, ends, null as user, null as type FROM "..escape(SBAN_PREFIX).."bans WHERE authid = '" ..escape(steamID).. "' AND (RemoveType IS NULL OR RemoveType != 'U') AND (length = 0 OR ends > UNIX_TIMESTAMP()) UNION SELECT c.bid, c.authid, c.length, c.reason, c.RemoveType, c.ends, a.user, c.type FROM "..escape(SBAN_PREFIX).."comms AS c LEFT JOIN "..escape(SBAN_PREFIX).."admins AS a ON a.aid = c.aid WHERE c.authid = '" ..escape(steamID).. "' AND (c.RemoveType IS NULL OR c.RemoveType != 'U') AND (c.length = 0 OR c.ends > UNIX_TIMESTAMP())",qTab)
 end
 
 -- ############### Family Sharing #################
@@ -532,7 +700,7 @@ local function AnnounceLender(ply,lender)
 		if !IsValid(ply) then return end
 		for k,v in pairs(player.GetAll()) do
 			if adminTable[v:GetUserGroup()] then
-				v:ChatPrint(string.format("[Family Sharing] %s (%s) has been lent Garry's Mod by %s", ply:Nick(), ply:SteamID(), lender))
+				v:ChatPrint(string.format("[Family Sharing] %s (%s) взял Garry's Mod у %s", ply:Nick(), ply:SteamID(), lender))
 			end
 		end
 	end)
@@ -540,12 +708,15 @@ local function AnnounceLender(ply,lender)
 end
 
 local function HandleSharedPlayer(ply, lenderSteamID)
+--[[]]
 	apiErrorCount = (apiErrorCount > 1) and (apiErrorCount - 1) or 0
 	if !IsValid(ply) then return end
 	AnnounceLender(ply,lenderSteamID)
 	ply.familyshared = true
 	ply.lenderid = lenderSteamID
-    StartBanCheck(ply, lenderSteamID)
+
+	StartUnivCheck(ply, lenderSteamID)
+
 end
 
 local function CheckFamilySharing(ply)
@@ -574,7 +745,7 @@ local function CheckFamilySharing(ply)
             body = util.JSONToTable(body)
 
             if not body or not body.response or not body.response.lender_steamid then
-                ErrorNoHalt(string.format("[SBAN] FamilySharing: Invalid Steam API response for %s | %s\n", ply:Nick(), ply:SteamID()))
+                ErrorNoHalt(string.format("[SBAN] FamilySharing: Неверный Steam API для %s | %s\n", ply:Nick(), ply:SteamID()))
 				apiErrorCount = apiErrorCount + 2
 				CheckFamilySharing(ply)
 				return
@@ -590,7 +761,7 @@ local function CheckFamilySharing(ply)
         
         function(code)
 			if !IsValid(ply) then return end
-			ErrorNoHalt(string.format("[SBAN] FamilySharing: Failed API call for %s | %s (Error: %s)\n", ply:Nick(), ply:SteamID(), code))
+			ErrorNoHalt(string.format("[SBAN] FamilySharing: Провален запрос API %s | %s (Error: %s)\n", ply:Nick(), ply:SteamID(), code))
 			apiErrorCount = apiErrorCount + 2
 			CheckFamilySharing(ply)
         end
@@ -614,8 +785,11 @@ end
 concommand.Add( "sban_serverid", SBAN_serverid_cmd)
 
 local function SBAN_playerconnect(ply, steamID)
-	StartBanCheck(ply, steamID)
+
+	StartUnivCheck(ply,steamID)
+
 	if checkSharing then CheckFamilySharing(ply) end
+	
 end
 
 local function PW_BanCheck(sid64, ip, svPass, clPass, name)
@@ -623,14 +797,15 @@ local function PW_BanCheck(sid64, ip, svPass, clPass, name)
 	qTab.name = name
 	qTab.steamID = util.SteamIDFrom64(sid64)
 	qTab.ip = string.Explode(":", ip)[1]
-	qTab.cb = function(result, qTab) DetermineBanned(result, qTab, true) end
+	qTab.cb = function(result, qTab) DetermineUniv(result, qTab, true) end
 	
-	SBAN_SQL_Query("SELECT bid, authid, ends, length, reason, RemoveType FROM "..database_sban:escape(SBAN_PREFIX).."bans WHERE authid = '" ..database_sban:escape(qTab.steamID).. "'", qTab)
-	
+	SBAN_SQL_Query("SELECT bid, authid, ends, length, reason, RemoveType, null as user, null as type FROM "..escape(SBAN_PREFIX).."bans WHERE authid = '" ..escape(qTab.steamID).. "' AND (RemoveType IS NULL OR RemoveType != 'U') AND (length = 0 OR ends > UNIX_TIMESTAMP()) ORDER BY length ASC LIMIT 1", qTab)
+
 	if checkIP then
-		SBAN_SQL_Query("SELECT bid, authid, ends, length, reason, RemoveType FROM "..database_sban:escape(SBAN_PREFIX).."bans WHERE ip = '" ..database_sban:escape(qTab.ip).. "'", qTab)
+		SBAN_SQL_Query("SELECT bid, authid, ends, length, reason, RemoveType, null as user, null as type FROM "..escape(SBAN_PREFIX).."bans WHERE ip = '" ..escape(qTab.ip).. "' AND (RemoveType IS NULL OR RemoveType != 'U') AND (length = 0 OR ends > UNIX_TIMESTAMP()) ORDER BY length ASC LIMIT 1", qTab)
 		ipCache[qTab.ip] = true
 	end
+
 end
 
 hook.Add( "PlayerAuthed", "sban_ulx", SBAN_playerconnect)
